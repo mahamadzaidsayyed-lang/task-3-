@@ -1,0 +1,215 @@
+"""Trend identification and predictive modeling of monthly hospital admissions.
+
+Run:  python forecast_analysis.py
+Input:  data/monthly_admissions.csv
+Output: charts/*.png, results.json, data/forecast_2025.csv
+Requires: numpy, pandas, matplotlib (no other libraries)
+"""
+import itertools
+import json
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+df = pd.read_csv("data/monthly_admissions.csv")
+df["Date"] = pd.to_datetime(df["Month"] + "-01")
+y = df["Admissions"].to_numpy(float)
+n = len(y)
+TEST = 12                       # hold out the final 12 months (2024)
+ntrain = n - TEST
+M = 12
+res = {"n_months": n, "n_train": ntrain, "n_test": TEST}
+C = {"navy": "#1F3864", "blue": "#2E75B6", "orange": "#ED7D31", "green": "#70AD47", "grey": "#7F7F7F", "red": "#C00000"}
+plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
+
+
+# ------------------------------------------------------------------ helpers
+def metrics(actual, pred):
+    e = actual - pred
+    return {"MAE": round(float(np.mean(np.abs(e))), 1),
+            "RMSE": round(float(np.sqrt(np.mean(e ** 2))), 1),
+            "MAPE": round(float(np.mean(np.abs(e) / actual) * 100), 2)}
+
+
+def design(dates, t_idx, seasonal=True, disruption=True):
+    X = [np.ones(len(t_idx)), t_idx.astype(float)]
+    if seasonal:
+        for m in range(2, 13):                                   # January is the baseline month
+            X.append((dates.month == m).astype(float))
+    if disruption:
+        X.append(((dates >= "2020-03-01") & (dates <= "2020-06-01")).astype(float))
+    return np.column_stack(X)
+
+
+def ols(X, yv):
+    beta, *_ = np.linalg.lstsq(X, yv, rcond=None)
+    resid = yv - X @ beta
+    dof = len(yv) - X.shape[1]
+    s2 = resid @ resid / dof
+    return beta, resid, s2, np.linalg.inv(X.T @ X)
+
+
+def holt_winters(yv, m, a, b, g, h):
+    """Additive Holt-Winters. Returns one-step-ahead fitted values and an h-step forecast."""
+    level = yv[:m].mean()
+    trend = (yv[m:2 * m].mean() - yv[:m].mean()) / m
+    seas = list(yv[:m] - level)
+    fitted = []
+    for i, obs in enumerate(yv):
+        s = seas[i % m] if i < m else seas[-m]
+        fitted.append(level + trend + s)
+        new_level = a * (obs - s) + (1 - a) * (level + trend)
+        trend = b * (new_level - level) + (1 - b) * trend
+        level = new_level
+        seas.append(g * (obs - new_level) + (1 - g) * s)
+    fc = [level + (k + 1) * trend + seas[-m + (k % m)] for k in range(h)]
+    return np.array(fitted), np.array(fc)
+
+
+# ------------------------------------------------- 1. Exploration and trend
+df["MA12"] = df["Admissions"].rolling(12, center=True).mean()
+yearly = df.groupby(df["Date"].dt.year)["Admissions"].mean().round(1)
+res["yearly_mean"] = {int(k): float(v) for k, v in yearly.items()}
+res["growth_2019_2024_pct"] = round(float((yearly.iloc[-1] / yearly.iloc[0] - 1) * 100), 1)
+monthly_avg = df.groupby(df["Date"].dt.month)["Admissions"].mean()
+res["peak_month"] = int(monthly_avg.idxmax())
+res["trough_month"] = int(monthly_avg.idxmin())
+res["peak_trough_gap"] = round(float(monthly_avg.max() - monthly_avg.min()), 0)
+res["corr_pct65_admissions"] = round(float(df["Pct_Aged_65_Plus"].corr(df["Admissions"])), 3)
+
+# classical additive decomposition (centered 12-month moving average)
+trend_c = df["Admissions"].rolling(12, center=True).mean()
+trend_c = (trend_c + trend_c.shift(-1)) / 2                       # 2x12 centered MA
+detr = df["Admissions"] - trend_c
+seas_idx = detr.groupby(df["Date"].dt.month).mean()
+seas_idx -= seas_idx.mean()
+seasonal_c = df["Date"].dt.month.map(seas_idx)
+resid_c = df["Admissions"] - trend_c - seasonal_c
+res["seasonal_index"] = {int(k): round(float(v), 1) for k, v in seas_idx.items()}
+
+# ------------------------------------------------- 2. Models on training data
+dates = pd.DatetimeIndex(df["Date"])
+t_idx = np.arange(n)
+tr, te = slice(0, ntrain), slice(ntrain, n)
+actual_test = y[te]
+preds = {}
+
+# Model A: seasonal naive (same month last year)
+preds["Seasonal naive"] = y[ntrain - M:ntrain]
+
+# Model B: linear trend regression
+XB = design(dates, t_idx, seasonal=False, disruption=True)
+bB, *_ = ols(XB[tr], y[tr])
+preds["Linear trend"] = XB[te] @ bB
+
+# Model C: trend + seasonal dummies + disruption (multiple linear regression)
+XC = design(dates, t_idx, seasonal=True, disruption=True)
+bC, rC, s2C, _ = ols(XC[tr], y[tr])
+preds["Trend + seasonality"] = XC[te] @ bC
+
+# Model D: Holt-Winters (additive), parameters chosen by grid search on training data
+best = None
+for a, b, g in itertools.product(np.linspace(0.05, 0.95, 10), [0.01, 0.03, 0.05, 0.1, 0.2], np.linspace(0.05, 0.95, 10)):
+    fit, _ = holt_winters(y[tr], M, a, b, g, 1)
+    sse = float(np.sum((y[tr][M:] - fit[M:]) ** 2))
+    if best is None or sse < best[0]:
+        best = (sse, a, b, g)
+_, aHW, bHW, gHW = best
+_, preds["Holt-Winters"] = holt_winters(y[tr], M, aHW, bHW, gHW, TEST)
+res["holt_winters_params"] = {"alpha": round(float(aHW), 2), "beta": round(float(bHW), 2), "gamma": round(float(gHW), 2)}
+
+res["test_metrics"] = {k: metrics(actual_test, v) for k, v in preds.items()}
+res["best_model_by_rmse"] = min(res["test_metrics"], key=lambda k: res["test_metrics"][k]["RMSE"])
+
+# fitted regression summary (training window)
+names = ["Intercept", "Trend"] + [f"Month_{m}" for m in range(2, 13)] + ["Disruption_2020"]
+res["model_c_coefficients"] = {k: round(float(v), 2) for k, v in zip(names, bC)}
+tss = np.sum((y[tr] - y[tr].mean()) ** 2)
+res["model_c_r2_train"] = round(float(1 - (rC @ rC) / tss), 3)
+res["model_c_resid_sd_train"] = round(float(np.sqrt(s2C)), 1)
+
+# ------------------------------------------------- 3. Refit on all data, forecast 2025
+beta, resid, s2, XtXi = ols(XC, y)
+future_dates = pd.date_range("2025-01-01", periods=12, freq="MS")
+Xf = design(future_dates, np.arange(n, n + 12), seasonal=True, disruption=True)
+fc = Xf @ beta
+se = np.sqrt(s2 * (1 + np.einsum("ij,jk,ik->i", Xf, XtXi, Xf)))
+lo, hi = fc - 1.96 * se, fc + 1.96 * se
+fdf = pd.DataFrame({"Month": future_dates.strftime("%Y-%m"), "Forecast": fc.round(0).astype(int),
+                    "Lower_95": lo.round(0).astype(int), "Upper_95": hi.round(0).astype(int)})
+fdf.to_csv("data/forecast_2025.csv", index=False)
+res["forecast_2025_total"] = int(fc.sum().round())
+res["actual_2024_total"] = int(y[-12:].sum())
+res["forecast_growth_vs_2024_pct"] = round(float((fc.sum() / y[-12:].sum() - 1) * 100), 1)
+res["forecast_peak"] = {"month": future_dates[int(np.argmax(fc))].strftime("%B %Y"), "value": int(round(fc.max())),
+                        "upper_95": int(round(hi[int(np.argmax(fc))]))}
+res["forecast_trough"] = {"month": future_dates[int(np.argmin(fc))].strftime("%B %Y"), "value": int(round(fc.min()))}
+res["trend_slope_per_month"] = round(float(beta[1]), 2)
+res["model_c_resid_sd_full"] = round(float(np.sqrt(s2)), 1)
+res["durbin_watson"] = round(float(np.sum(np.diff(resid) ** 2) / np.sum(resid ** 2)), 2)
+
+# bed demand illustration (admissions x average length of stay / days in month)
+alos = float(df["Avg_Length_of_Stay"].tail(12).mean())
+days = future_dates.days_in_month.to_numpy()
+beds_fc = fc * alos / days
+beds_hi = hi * alos / days
+res["alos_last12"] = round(alos, 2)
+res["beds_needed_peak_forecast"] = int(np.ceil(beds_fc.max()))
+res["beds_needed_peak_upper"] = int(np.ceil(beds_hi.max()))
+res["beds_needed_trough_forecast"] = int(np.ceil(beds_fc.min()))
+res["beds_needed_2024_peak_actual"] = int(np.ceil((y[-12:] * df["Avg_Length_of_Stay"].tail(12).to_numpy()
+                                                   / df["Date"].tail(12).dt.days_in_month.to_numpy()).max()))
+
+# ================================================================= CHARTS
+# 1. Raw series + moving average
+fig, ax = plt.subplots(figsize=(8, 4.2))
+ax.plot(df["Date"], y, color=C["blue"], lw=1.6, label="Monthly admissions")
+ax.plot(df["Date"], df["MA12"], color=C["orange"], lw=2.6, label="12-month moving average (trend)")
+ax.axvspan(pd.Timestamp("2020-03-01"), pd.Timestamp("2020-06-30"), color=C["grey"], alpha=0.2, label="Spring 2020 disruption")
+ax.set(title="Monthly Hospital Admissions, 2019 to 2024", ylabel="Admissions per month")
+ax.legend(frameon=False, loc="upper left", fontsize=9)
+fig.tight_layout(); fig.savefig("charts/1_admissions_trend.png", dpi=150); plt.close(fig)
+
+# 2. Decomposition
+fig, axes = plt.subplots(4, 1, figsize=(8, 7.6), sharex=True)
+for ax, ser, ttl, col in zip(axes, [df["Admissions"], trend_c, seasonal_c, resid_c],
+                             ["Observed", "Trend", "Seasonal component", "Residual"],
+                             [C["navy"], C["orange"], C["green"], C["grey"]]):
+    ax.plot(df["Date"], ser, color=col, lw=1.6); ax.set_ylabel(ttl, fontsize=9)
+axes[0].set_title("Classical Decomposition of Monthly Admissions")
+fig.tight_layout(); fig.savefig("charts/2_decomposition.png", dpi=150); plt.close(fig)
+
+# 3. Model comparison on the 2024 hold-out
+fig, ax = plt.subplots(figsize=(8, 4.4))
+ax.plot(df["Date"][te], actual_test, color="black", lw=2.6, marker="o", label="Actual 2024")
+for (name, pr), col in zip(preds.items(), [C["grey"], C["orange"], C["blue"], C["green"]]):
+    ax.plot(df["Date"][te], pr, lw=1.8, ls="--", color=col, label=f"{name} (RMSE {res['test_metrics'][name]['RMSE']})")
+ax.set(title="Model Comparison on the 2024 Hold-out Year", ylabel="Admissions per month")
+ax.legend(frameon=False, fontsize=9)
+plt.setp(ax.get_xticklabels(), rotation=30)
+fig.tight_layout(); fig.savefig("charts/3_model_comparison.png", dpi=150); plt.close(fig)
+
+# 4. 2025 forecast with prediction interval
+fig, ax = plt.subplots(figsize=(8, 4.4))
+ax.plot(df["Date"], y, color=C["blue"], lw=1.6, label="Observed 2019 to 2024")
+ax.plot(future_dates, fc, color=C["orange"], lw=2.6, marker="o", ms=4, label="Forecast 2025")
+ax.fill_between(future_dates, lo, hi, color=C["orange"], alpha=0.25, label="95% prediction interval")
+ax.set(title="Forecast of Monthly Admissions for 2025", ylabel="Admissions per month")
+ax.legend(frameon=False, loc="upper left", fontsize=9)
+fig.tight_layout(); fig.savefig("charts/4_forecast_2025.png", dpi=150); plt.close(fig)
+
+# 5. Residual diagnostics for the regression model (full fit)
+fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.8))
+axes[0].plot(df["Date"], resid, color=C["navy"], lw=1.2); axes[0].axhline(0, color=C["red"], ls="--")
+axes[0].set(title="Residuals over time", ylabel="Residual")
+axes[0].tick_params(axis="x", rotation=40)
+axes[1].hist(resid, bins=14, color=C["blue"], edgecolor="white")
+axes[1].set(title="Residual distribution", xlabel="Residual")
+fig.tight_layout(); fig.savefig("charts/5_residual_diagnostics.png", dpi=150); plt.close(fig)
+
+with open("results.json", "w") as fh:
+    json.dump(res, fh, indent=2)
+print(json.dumps(res, indent=2))
+print(fdf)
