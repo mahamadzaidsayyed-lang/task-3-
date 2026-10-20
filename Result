@@ -1,0 +1,97 @@
+"n_months": 72,
+  "n_train": 60,
+  "n_test": 12,
+  "yearly_mean": {
+    "2019": 1020.9,
+    "2020": 1001.8,
+    "2021": 1111.8,
+    "2022": 1174.2,
+    "2023": 1231.0,
+    "2024": 1268.7
+  },
+  "growth_2019_2024_pct": 24.3,
+  "peak_month": 12,
+  "trough_month": 6,
+  "peak_trough_gap": 194.0,
+  "corr_pct65_admissions": 0.771,
+  "seasonal_index": {
+    "1": 99.4,
+    "2": 94.7,
+    "3": 14.3,
+    "4": -28.5,
+    "5": -68.3,
+    "6": -90.7,
+    "7": -90.2,
+    "8": -56.3,
+    "9": -35.6,
+    "10": 4.8,
+    "11": 70.0,
+    "12": 86.5
+  },
+  "holt_winters_params": {
+    "alpha": 0.75,
+    "beta": 0.01,
+    "gamma": 0.25
+  },
+  "test_metrics": {
+    "Seasonal naive": {
+      "MAE": 38.2,
+      "RMSE": 43.4,
+      "MAPE": 3.03
+    },
+    "Linear trend": {
+      "MAE": 53.8,
+      "RMSE": 57.7,
+      "MAPE": 4.25
+    },
+    "Trend + seasonality": {
+      "MAE": 19.9,
+      "RMSE": 23.9,
+      "MAPE": 1.58
+    },
+    "Holt-Winters": {
+      "MAE": 51.6,
+      "RMSE": 55.1,
+      "MAPE": 4.09
+    }
+  },
+  "best_model_by_rmse": "Trend + seasonality",
+  "model_c_coefficients": {
+    "Intercept": 1076.23,
+    "Trend": 4.48,
+    "Month_2": -0.88,
+    "Month_3": -53.99,
+    "Month_4": -94.07,
+    "Month_5": -135.15,
+    "Month_6": -162.03,
+    "Month_7": -190.69,
+    "Month_8": -157.18,
+    "Month_9": -136.86,
+    "Month_10": -96.74,
+    "Month_11": -31.82,
+    "Month_12": -15.5,
+    "Disruption_2020": -163.89
+  },
+  "model_c_r2_train": 0.98,
+  "model_c_resid_sd_train": 19.1,
+  "forecast_2025_total": 15915,
+  "actual_2024_total": 15224,
+  "forecast_growth_vs_2024_pct": 4.5,
+  "forecast_peak": {
+    "month": "December 2025",
+    "value": 1418,
+    "upper_95": 1461
+  },
+  "forecast_trough": {
+    "month": "July 2025",
+    "value": 1234
+  },
+  "trend_slope_per_month": 4.34,
+  "model_c_resid_sd_full": 19.4,
+  "durbin_watson": 1.87,
+  "alos_last12": 5.54,
+  "beds_needed_peak_forecast": 276,
+  "beds_needed_peak_upper": 284,
+  "beds_needed_trough_forecast": 221,
+  "beds_needed_2024_peak_actual": 261
+}
